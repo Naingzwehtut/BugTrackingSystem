@@ -1,57 +1,25 @@
-import { ROLES } from './constants'
+import { ROLE_STATUS_MOVES, ROLES, WORKFLOW } from '@/config/constants'
 
-// Frontend-side hints only. The backend is the final authority for every
-// permission check — these helpers just decide which buttons to show.
+// Frontend-side hints only. The backend is the final authority on every
+// permission check - these helpers just decide which controls to show.
 
-export function canCreateBug(user) {
-  return user?.role === ROLES.TESTER
-}
-
-export function canAssignBug(user) {
-  return user?.role === ROLES.ADMIN
-}
-
-export function canDeleteBug(user) {
-  return user?.role === ROLES.ADMIN
-}
+export const canCreateBug = (user) => user?.role === ROLES.TESTER
+export const canAssignBug = (user) => user?.role === ROLES.ADMIN
+export const canDeleteBug = (user) => user?.role === ROLES.ADMIN
+export const canManageUsers = (user) => user?.role === ROLES.ADMIN
 
 export function canEditBug(user, bug) {
   if (!user || !bug) return false
   if (user.role === ROLES.ADMIN) return true
-  if (user.role === ROLES.DEVELOPER) {
-    return bug.assigned_to === user.id || bug.assigned_developer_id === user.id
-  }
-  return false
+  return user.role === ROLES.DEVELOPER && bug.assigned_to === user.id
 }
 
-export function canManageUsers(user) {
-  return user?.role === ROLES.ADMIN
-}
-
-// Which next statuses a role is allowed to attempt from the current status.
-// The backend will still reject anything it doesn't allow — this only keeps
-// obviously-wrong buttons off the screen.
+// Next statuses this user may attempt: the workflow's legal moves, narrowed
+// to the ones the user's role is allowed to make. Admins may make any legal move.
 export function availableStatusActions(user, currentStatus) {
   if (!user) return []
-  const role = user.role
-
-  if (role === ROLES.DEVELOPER) {
-    if (currentStatus === 'Open') return ['In Progress']
-    if (currentStatus === 'In Progress') return ['Resolved']
-    if (currentStatus === 'Reopened') return ['In Progress']
-    return []
-  }
-
-  if (role === ROLES.TESTER) {
-    if (currentStatus === 'Resolved') return ['Closed', 'Reopened']
-    return []
-  }
-
-  if (role === ROLES.ADMIN) {
-    // Admin can manage more broadly; backend still validates.
-    const all = ['Open', 'In Progress', 'Resolved', 'Closed', 'Reopened']
-    return all.filter((s) => s !== currentStatus)
-  }
-
-  return []
+  const next = WORKFLOW[currentStatus] ?? []
+  if (user.role === ROLES.ADMIN) return next
+  const allowed = ROLE_STATUS_MOVES[user.role]
+  return allowed ? next.filter((status) => allowed.has(`${currentStatus}>${status}`)) : []
 }

@@ -1,99 +1,161 @@
+import { KeyRound, ShieldCheck } from 'lucide-react'
 import { useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Bug, Info } from 'lucide-react'
-import { useAuth } from '../../hooks/useAuth'
-import { getErrorMessage } from '../../services/api'
+import AuthCard from '@/components/layout/AuthCard'
+import Alert from '@/components/ui/Alert'
+import Button from '@/components/ui/Button'
+import Field from '@/components/ui/Field'
+import PasswordField from '@/components/ui/PasswordField'
+import SegmentedControl from '@/components/ui/SegmentedControl'
+import { NAME_MAX, REASON_MAX } from '@/config/constants'
+import { useAuth } from '@/hooks/useAuth'
+import { usePageTitle } from '@/hooks/usePageTitle'
+import { useToast } from '@/hooks/useToast'
+import { getErrorMessage } from '@/services/api'
+import {
+  compactErrors,
+  validateEmail,
+  validateInviteCode,
+  validateName,
+  validatePassword,
+  validateReason,
+} from '@/utils/validation'
+
+const MODES = [
+  { value: 'join', label: 'Join a project', icon: KeyRound },
+  { value: 'admin', label: 'Request admin access', icon: ShieldCheck },
+]
 
 export default function Register() {
+  usePageTitle('Create account')
   const { register } = useAuth()
   const navigate = useNavigate()
+  const toast = useToast()
 
-  const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '' })
-  const [error, setError] = useState('')
-  const [success, setSuccess] = useState('')
+  const [mode, setMode] = useState('join')
+  const [form, setForm] = useState({ name: '', email: '', password: '', confirm: '', inviteCode: '', reason: '' })
+  const [errors, setErrors] = useState({})
+  const [serverError, setServerError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  function update(field) {
-    return (e) => setForm((f) => ({ ...f, [field]: e.target.value }))
+  // Editing a field clears its error straight away.
+  const update = (field) => (event) => {
+    setForm((current) => ({ ...current, [field]: event.target.value }))
+    setErrors((current) => ({ ...current, [field]: '' }))
   }
 
-  async function handleSubmit(e) {
-    e.preventDefault()
-    setError('')
-    setSuccess('')
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setServerError('')
 
-    if (form.password !== form.confirm) {
-      setError('Passwords do not match.')
-      return
-    }
+    const found = compactErrors({
+      name: validateName(form.name),
+      email: validateEmail(form.email),
+      password: validatePassword(form.password),
+      confirm: form.password === form.confirm ? '' : 'Passwords do not match.',
+      inviteCode: mode === 'join' ? validateInviteCode(form.inviteCode) : '',
+      reason: mode === 'admin' ? validateReason(form.reason) : '',
+    })
+    setErrors(found)
+    if (Object.keys(found).length > 0) return
 
     setLoading(true)
     try {
-      await register(form.name, form.email, form.password)
-      setSuccess('Account created successfully. You can now log in.')
-      setTimeout(() => navigate('/login'), 1200)
+      const base = { name: form.name.trim(), email: form.email.trim(), password: form.password }
+      const payload =
+        mode === 'join'
+          ? { ...base, invite_code: form.inviteCode.trim() }
+          : { ...base, request_admin: true, reason: form.reason.trim() }
+      const { message } = await register(payload)
+      toast.success(message || 'Account created. Sign in to continue.')
+      // Pre-fill the email so signing in is just the password.
+      navigate('/login', { state: { email: form.email.trim() } })
     } catch (err) {
-      setError(getErrorMessage(err))
-    } finally {
+      setServerError(getErrorMessage(err))
       setLoading(false)
     }
   }
 
   return (
-    <div className="card w-full max-w-md p-8">
-      <div className="mb-6 flex flex-col items-center text-center">
-        <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-xl bg-primary-600 text-white">
-          <Bug size={24} />
-        </div>
-        <h1 className="text-xl font-semibold text-gray-900">Create an account</h1>
-        <p className="mt-1 text-sm text-gray-500">Join the Bug Tracking System</p>
-      </div>
+    <AuthCard
+      title="Create an account"
+      subtitle="Join your team's bug tracker"
+      footer={
+        <>
+          Already have an account?{' '}
+          <Link to="/login" className="font-medium text-primary-600 hover:underline">
+            Sign in
+          </Link>
+        </>
+      }
+    >
+      <SegmentedControl label="How are you joining?" options={MODES} value={mode} onChange={setMode} className="mb-4" />
 
-      <div className="mb-4 flex items-start gap-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-700">
-        <Info size={14} className="mt-0.5 shrink-0" />
-        <span>New public accounts are always created as <strong>Tester</strong> accounts.</span>
-      </div>
+      <Alert variant="info" className="mb-4">
+        {mode === 'join' ? (
+          <>
+            Ask your project admin for the <strong>invite code</strong>. Everyone joins as a <strong>Tester</strong>; your
+            admin can promote you later.
+          </>
+        ) : (
+          <>
+            The platform owners will review your request and email you. Once approved, you can create a project and
+            invite your team.
+          </>
+        )}
+      </Alert>
+      <Alert variant="error" className="mb-4">
+        {serverError}
+      </Alert>
 
-      {error && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-          {error}
-        </div>
-      )}
-      {success && (
-        <div className="mb-4 rounded-lg border border-green-200 bg-green-50 px-3 py-2 text-sm text-green-600">
-          {success}
-        </div>
-      )}
+      <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
+        <Field label="Name" autoComplete="name" maxLength={NAME_MAX} value={form.name} onChange={update('name')} error={errors.name} />
+        <Field label="Email" type="email" autoComplete="email" value={form.email} onChange={update('email')} error={errors.email} />
+        <PasswordField
+          label="Password"
+          autoComplete="new-password"
+          value={form.password}
+          onChange={update('password')}
+          error={errors.password}
+          hint="At least 8 characters, including a letter and a number."
+        />
+        <PasswordField
+          label="Confirm Password"
+          autoComplete="new-password"
+          value={form.confirm}
+          onChange={update('confirm')}
+          error={errors.confirm}
+        />
 
-      <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-        <div>
-          <label className="label">Name</label>
-          <input required className="input" value={form.name} onChange={update('name')} />
-        </div>
-        <div>
-          <label className="label">Email</label>
-          <input type="email" required className="input" value={form.email} onChange={update('email')} />
-        </div>
-        <div>
-          <label className="label">Password</label>
-          <input type="password" required className="input" value={form.password} onChange={update('password')} />
-        </div>
-        <div>
-          <label className="label">Confirm Password</label>
-          <input type="password" required className="input" value={form.confirm} onChange={update('confirm')} />
-        </div>
+        {mode === 'join' ? (
+          <Field
+            label="Project invite code"
+            placeholder="BUG-7KQ2X9"
+            autoComplete="off"
+            className="font-mono uppercase placeholder:normal-case"
+            maxLength={12}
+            value={form.inviteCode}
+            onChange={update('inviteCode')}
+            error={errors.inviteCode}
+          />
+        ) : (
+          <Field
+            as="textarea"
+            rows={3}
+            label="Why do you need admin access?"
+            placeholder="e.g. I'm the team lead for our CSC480 mobile app project."
+            className="resize-y"
+            maxLength={REASON_MAX}
+            value={form.reason}
+            onChange={update('reason')}
+            error={errors.reason}
+          />
+        )}
 
-        <button type="submit" disabled={loading} className="btn-primary w-full">
-          {loading ? 'Creating account...' : 'Register'}
-        </button>
+        <Button type="submit" loading={loading} loadingText="Creating account..." className="w-full">
+          {mode === 'join' ? 'Create account & join' : 'Create account & send request'}
+        </Button>
       </form>
-
-      <p className="mt-6 text-center text-sm text-gray-500">
-        Already have an account?{' '}
-        <Link to="/login" className="font-medium text-primary-600 hover:underline">
-          Login
-        </Link>
-      </p>
-    </div>
+    </AuthCard>
   )
 }

@@ -1,178 +1,182 @@
-import { useEffect, useMemo, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
-import { Trash2 } from 'lucide-react'
-import * as bugService from '../../services/bugService'
-import * as userService from '../../services/userService'
-import { getErrorMessage } from '../../services/api'
-import { useAuth } from '../../hooks/useAuth'
-import { useToast } from '../../components/common/Toast.jsx'
-import BugTable from '../../components/bugs/BugTable.jsx'
-import BugFilters from '../../components/bugs/BugFilters.jsx'
-import Modal from '../../components/common/Modal.jsx'
-import LoadingSpinner from '../../components/common/LoadingSpinner.jsx'
-import ErrorState from '../../components/common/ErrorState.jsx'
-import { canDeleteBug } from '../../utils/permissions'
-import { ROLES } from '../../utils/constants'
+import { PlusCircle, Trash2, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link } from 'react-router-dom'
+import BugFilters from '@/components/bugs/BugFilters'
+import BugTable from '@/components/bugs/BugTable'
+import ErrorState from '@/components/feedback/ErrorState'
+import Button from '@/components/ui/Button'
+import ConfirmDialog from '@/components/ui/ConfirmDialog'
+import PageHeader from '@/components/ui/PageHeader'
+import Pagination from '@/components/ui/Pagination'
+import Skeleton from '@/components/ui/Skeleton'
+import { PAGE_SIZE, ROLES } from '@/config/constants'
+import { useAuth } from '@/hooks/useAuth'
+import { useBugListParams } from '@/hooks/useBugListParams'
+import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { useFetch } from '@/hooks/useFetch'
+import { useLiveRefresh } from '@/hooks/useLiveRefresh'
+import { usePageTitle } from '@/hooks/usePageTitle'
+import { useToast } from '@/hooks/useToast'
+import { getErrorMessage } from '@/services/api'
+import { deleteBug, getBugs } from '@/services/bugService'
+import { getDevelopers } from '@/services/userService'
+import { countActiveFilters, filterAndSortBugs } from '@/utils/bugFilters'
+import { canCreateBug, canDeleteBug } from '@/utils/permissions'
 
-const PAGE_SIZE = 10
+function ListSkeleton() {
+  return (
+    <div className="flex flex-col gap-4" role="status" aria-label="Loading bugs">
+      <Skeleton className="h-8 w-40" />
+      <Skeleton className="h-16" />
+      <div className="card flex flex-col gap-3 p-4">
+        {Array.from({ length: 6 }, (_, index) => (
+          <Skeleton key={index} className="h-9" />
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export default function BugList() {
   const { user } = useAuth()
-  const { showToast } = useToast()
-  const navigate = useNavigate()
+  const toast = useToast()
+  const isAdmin = user?.role === ROLES.ADMIN
+  const isDeveloper = user?.role === ROLES.DEVELOPER
+  const title = isDeveloper ? 'Assigned Bugs' : 'Bugs'
+  usePageTitle(title)
 
-  const [bugs, setBugs] = useState([])
-  const [developers, setDevelopers] = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [page, setPage] = useState(1)
+  const { data, loading, error, reload, setData } = useFetch(
+    async (signal) => {
+      // Bugs and (for admins) the developer filter options load in parallel.
+      const [bugs, developers] = await Promise.all([
+        getBugs({}, { signal }),
+        isAdmin ? getDevelopers({ signal }) : Promise.resolve([]),
+      ])
+      return { bugs, developers }
+    },
+    [isAdmin],
+  )
+
+  useLiveRefresh(reload) // new or changed bugs appear without a reload
+
+  // Filters, sort and page live in the URL, so Back from a bug keeps them.
+  const { filters, page, setFilters, setPage, clearFilters } = useBugListParams()
   const [bugToDelete, setBugToDelete] = useState(null)
   const [deleting, setDeleting] = useState(false)
 
-  const [filters, setFilters] = useState({
-    search: '',
-    status: '',
-    priority: '',
-    severity: '',
-    developer: '',
-    sort: 'newest',
-  })
+  // Wait until typing pauses before re-filtering the whole list.
+  const search = useDebouncedValue(filters.search)
+  const { status, priority, severity, developer, sort } = filters
+  const bugs = data?.bugs
 
-  async function load() {
-    setLoading(true)
-    setError('')
-    try {
-      const res = await bugService.getBugs()
-      setBugs(res.data?.bugs || res.data || [])
-      if (user?.role === ROLES.ADMIN) {
-        const devRes = await userService.getDevelopers()
-        setDevelopers(devRes.data?.developers || devRes.data || [])
-      }
-    } catch (err) {
-      setError(getErrorMessage(err))
-    } finally {
-      setLoading(false)
-    }
-  }
-
-  useEffect(() => {
-    load()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
-  const filtered = useMemo(() => {
-    let result = [...bugs]
-
-    if (filters.search) {
-      const q = filters.search.toLowerCase()
-      result = result.filter((b) => b.title?.toLowerCase().includes(q))
-    }
-    if (filters.status) result = result.filter((b) => b.status === filters.status)
-    if (filters.priority) result = result.filter((b) => b.priority === filters.priority)
-    if (filters.severity) result = result.filter((b) => b.severity === filters.severity)
-    if (filters.developer) {
-      result = result.filter(
-        (b) => String(b.assigned_to || b.assigned_developer_id) === String(filters.developer)
-      )
-    }
-
-    result.sort((a, b) => {
-      const diff = new Date(b.created_at) - new Date(a.created_at)
-      return filters.sort === 'newest' ? diff : -diff
-    })
-
-    return result
-  }, [bugs, filters])
+  const filtered = useMemo(
+    () => filterAndSortBugs(bugs ?? [], { search, status, priority, severity, developer, sort }),
+    [bugs, search, status, priority, severity, developer, sort],
+  )
 
   const totalPages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE))
-  const paginated = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE)
+  const currentPage = Math.min(page, totalPages)
+  const visible = filtered.slice((currentPage - 1) * PAGE_SIZE, currentPage * PAGE_SIZE)
+  const activeCount = countActiveFilters(filters)
 
-  function handleFilterChange(next) {
-    setFilters(next)
-    setPage(1)
-  }
+  // Changing page jumps back to the top of the list, not the bottom of the old page.
+  const topRef = useRef(null)
+  const previousPage = useRef(currentPage)
+  useEffect(() => {
+    if (previousPage.current !== currentPage) topRef.current?.scrollIntoView({ block: 'start' })
+    previousPage.current = currentPage
+  }, [currentPage])
 
   async function confirmDelete() {
-    if (!bugToDelete) return
     setDeleting(true)
     try {
-      await bugService.deleteBug(bugToDelete.id)
-      showToast('Bug deleted successfully.', 'success')
-      setBugs((prev) => prev.filter((b) => b.id !== bugToDelete.id))
+      await deleteBug(bugToDelete.id)
+      setData((current) => ({ ...current, bugs: current.bugs.filter((bug) => bug.id !== bugToDelete.id) }))
+      toast.success('Bug deleted.')
       setBugToDelete(null)
     } catch (err) {
-      showToast(getErrorMessage(err), 'error')
+      toast.error(getErrorMessage(err))
     } finally {
       setDeleting(false)
     }
   }
 
-  if (loading) return <LoadingSpinner label="Loading bugs..." />
-  if (error) return <ErrorState message={error} onRetry={load} />
+  if (loading) return <ListSkeleton />
+  if (error) return <ErrorState message={error} onRetry={reload} />
+
+  const total = bugs.length
+  const subtitle = isDeveloper ? 'Bugs that have been assigned to you.' : 'Browse, filter and manage reported bugs.'
+
+  // Two different "empty" situations deserve two different messages.
+  const empty =
+    total === 0
+      ? {
+          emptyMessage: isDeveloper ? 'No bugs are assigned to you yet.' : 'No bugs have been reported yet.',
+          emptyAction: canCreateBug(user) && (
+            <Link to="/tester/create-bug" className="btn-primary mt-2">
+              <PlusCircle size={16} aria-hidden="true" /> Report the first bug
+            </Link>
+          ),
+        }
+      : {
+          emptyMessage: 'No bugs match these filters.',
+          emptyDescription: 'Try a different search or clear the filters.',
+          emptyAction: (
+            <Button variant="secondary" icon={X} onClick={clearFilters} className="mt-2">
+              Clear filters
+            </Button>
+          ),
+        }
 
   return (
-    <div className="flex flex-col gap-4">
-      <div>
-        <h1 className="text-xl font-semibold text-gray-900">Bugs</h1>
-        <p className="text-sm text-gray-500">Browse, filter and manage reported bugs.</p>
-      </div>
+    <div ref={topRef} className="flex scroll-mt-20 flex-col gap-4">
+      <PageHeader
+        title={title}
+        subtitle={subtitle}
+        actions={
+          canCreateBug(user) && (
+            <Link to="/tester/create-bug" className="btn-primary">
+              <PlusCircle size={16} aria-hidden="true" /> Create Bug
+            </Link>
+          )
+        }
+      />
 
       <BugFilters
         filters={filters}
-        onChange={handleFilterChange}
-        developers={developers}
-        showDeveloperFilter={user?.role === ROLES.ADMIN}
+        onChange={setFilters}
+        developers={data.developers}
+        showDeveloperFilter={isAdmin}
+        activeCount={activeCount}
+        onClear={clearFilters}
       />
 
-      <BugTable
-        bugs={paginated}
-        canDelete={canDeleteBug(user)}
-        onDelete={(bug) => setBugToDelete(bug)}
-      />
-
-      {totalPages > 1 && (
-        <div className="flex items-center justify-between text-sm text-gray-500">
-          <span>
-            Page {page} of {totalPages}
-          </span>
-          <div className="flex gap-2">
-            <button
-              className="btn-secondary"
-              disabled={page === 1}
-              onClick={() => setPage((p) => p - 1)}
-            >
-              Previous
-            </button>
-            <button
-              className="btn-secondary"
-              disabled={page === totalPages}
-              onClick={() => setPage((p) => p + 1)}
-            >
-              Next
-            </button>
-          </div>
-        </div>
+      {activeCount > 0 && filtered.length > 0 && (
+        <p className="-mb-1 text-xs text-gray-500" aria-live="polite">
+          {filtered.length} of {total} bugs match
+        </p>
       )}
 
-      <Modal
-        title="Delete Bug"
-        isOpen={!!bugToDelete}
-        onClose={() => setBugToDelete(null)}
-      >
-        <p className="mb-4 text-sm text-gray-600">
-          Are you sure you want to delete{' '}
-          <span className="font-medium text-gray-900">"{bugToDelete?.title}"</span>? This
-          action cannot be undone.
-        </p>
-        <div className="flex justify-end gap-3">
-          <button className="btn-secondary" onClick={() => setBugToDelete(null)}>
-            Cancel
-          </button>
-          <button disabled={deleting} onClick={confirmDelete} className="btn-danger">
-            <Trash2 size={14} /> {deleting ? 'Deleting...' : 'Delete'}
-          </button>
-        </div>
-      </Modal>
+      <BugTable bugs={visible} canDelete={canDeleteBug(user)} onDelete={setBugToDelete} {...empty} />
+
+      <Pagination page={currentPage} pageSize={PAGE_SIZE} total={filtered.length} onPageChange={setPage} />
+
+      <ConfirmDialog
+        isOpen={Boolean(bugToDelete)}
+        title="Delete bug?"
+        message={
+          <>
+            <span className="font-medium text-gray-900">&ldquo;{bugToDelete?.title}&rdquo;</span> and all of its
+            comments and history will be permanently deleted. This cannot be undone.
+          </>
+        }
+        confirmLabel="Delete bug"
+        loadingLabel="Deleting..."
+        icon={Trash2}
+        loading={deleting}
+        onConfirm={confirmDelete}
+        onCancel={() => setBugToDelete(null)}
+      />
     </div>
   )
 }

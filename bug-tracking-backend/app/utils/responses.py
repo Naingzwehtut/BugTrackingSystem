@@ -1,8 +1,9 @@
 """
 app/utils/responses.py
------------------------
-Small helpers so every endpoint in the app returns JSON in exactly the
-same shape. This keeps the frontend team's life simple.
+------------------------
+Helpers so every endpoint returns JSON in exactly the same shape:
+  {"success": true,  "message": "...", "data": {...}}
+  {"success": false, "message": "...", "errors": {...}}
 """
 
 from flask import jsonify

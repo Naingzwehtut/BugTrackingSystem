@@ -1,74 +1,73 @@
 """
 app/routes/comments.py
 ------------------------
-  POST /api/bugs/<bug_id>/comments  - add a comment to a bug
-  GET  /api/bugs/<bug_id>/comments  - list comments on a bug
+  POST /api/bugs/<bug_id>/comments  - add a comment
+  GET  /api/bugs/<bug_id>/comments  - list comments (oldest first)
 
-Registered under the same "/api/bugs" prefix as routes/bugs.py (see
-app/__init__.py) so the final URLs match the spec exactly:
-  /api/bugs/<id>/comments
+Registered under the same "/api/bugs" prefix as routes/bugs.py. Anyone who
+can view a bug may read and write its comments.
 """
 
-from flask import Blueprint, request, g, current_app
+from flask import Blueprint, g
 
+from app.errors import BadRequestError
+from app.extensions import get_db
 from app.middleware.auth import token_required
-from app.utils.responses import success_response, error_response
-from app.utils.validators import require_fields
+from app.middleware.permissions import project_required
+from app.services.notification_service import NotificationType, notify
+from app.services.bug_service import get_viewable_bug, serialize_comment
+from app.utils.request import first_row, json_body
+from app.utils.responses import success_response
+from app.utils.validators import COMMENT_MAX, clean_str
 
 comments_bp = Blueprint("comments", __name__)
 
 
-def _get_bug_or_none(supabase, bug_id):
-    result = supabase.table("bugs").select("*").eq("id", bug_id).limit(1).execute()
-    return result.data[0] if result.data else None
-
-
-def _can_view_bug(user, bug):
-    if user["role"] in ("admin", "tester"):
-        return True
-    return bug.get("assigned_to") == user["id"]
-
-
 @comments_bp.route("/<bug_id>/comments", methods=["POST"])
 @token_required
+@project_required
 def add_comment(bug_id):
-    supabase = current_app.config["SUPABASE_CLIENT"]
-    bug = _get_bug_or_none(supabase, bug_id)
-    if not bug:
-        return error_response("Bug not found", 404)
-    if not _can_view_bug(g.current_user, bug):
-        return error_response("You do not have permission to comment on this bug", 403)
+    bug = get_viewable_bug(bug_id, "comment on this bug")
 
-    data = request.get_json(silent=True) or {}
-    missing = require_fields(data, ["comment"])
-    if missing:
-        return error_response("A non-empty 'comment' field is required", 400)
-
-    comment_text = data["comment"].strip()
+    text = clean_str(json_body().get("comment"))
+    if not text:
+        raise BadRequestError("A non-empty 'comment' field is required")
+    if len(text) > COMMENT_MAX:
+        raise BadRequestError(f"Comment must be at most {COMMENT_MAX} characters")
 
     result = (
-        supabase.table("comments")
-        .insert({"bug_id": bug_id, "user_id": g.current_user["id"], "comment": comment_text})
+        get_db()
+        .table("comments")
+        .insert({"bug_id": bug["id"], "user_id": g.current_user["id"], "comment": text})
         .execute()
     )
-    return success_response("Comment added successfully", {"comment": result.data[0]}, 201)
+    row = first_row(result, "Failed to add comment")
+    preview = text if len(text) <= 80 else f"{text[:77]}..."
+    notify(
+        [bug.get("reported_by"), bug.get("assigned_to")],
+        NotificationType.COMMENT_ADDED,
+        f"{g.current_user['name']} commented on {bug['title']}: \"{preview}\"",
+        bug_id=bug["id"],
+    )
+    return success_response(
+        "Comment added successfully",
+        {"comment": serialize_comment(row, author=g.current_user)},
+        201,
+    )
 
 
 @comments_bp.route("/<bug_id>/comments", methods=["GET"])
 @token_required
+@project_required
 def get_comments(bug_id):
-    supabase = current_app.config["SUPABASE_CLIENT"]
-    bug = _get_bug_or_none(supabase, bug_id)
-    if not bug:
-        return error_response("Bug not found", 404)
-    if not _can_view_bug(g.current_user, bug):
-        return error_response("You do not have permission to view comments on this bug", 403)
-
-    result = (
-        supabase.table("comments")
+    bug = get_viewable_bug(bug_id, "view comments on this bug")
+    rows = (
+        get_db()
+        .table("comments")
         .select("*, users(name, email, role)")
-        .eq("bug_id", bug_id)
+        .eq("bug_id", bug["id"])
         .order("created_at", desc=False)
         .execute()
+        .data
     )
-    return success_response("Comments retrieved", {"comments": result.data})
+    return success_response("Comments retrieved", {"comments": [serialize_comment(r) for r in rows]})

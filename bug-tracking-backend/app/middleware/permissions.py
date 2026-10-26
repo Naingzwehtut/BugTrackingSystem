@@ -16,7 +16,27 @@ Example:
 from functools import wraps
 from flask import g
 
-from app.utils.responses import error_response
+from app.errors import ForbiddenError, UnauthorizedError
+
+
+def project_required(f):
+    """
+    The user must belong to a project (use AFTER @token_required).
+
+    Every bug, comment and member query is scoped to the caller's project,
+    so users who haven't created or joined one yet get a clear 403.
+    """
+
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        current_user = getattr(g, "current_user", None)
+        if not current_user:
+            raise UnauthorizedError("Authentication required")
+        if not current_user.get("project_id"):
+            raise ForbiddenError("Join or create a project first")
+        return f(*args, **kwargs)
+
+    return decorated
 
 
 def role_required(*allowed_roles):
@@ -29,12 +49,10 @@ def role_required(*allowed_roles):
             if not current_user:
                 # Should never happen if @token_required ran first, but
                 # guard against misuse/misordering of decorators.
-                return error_response("Authentication required", 401)
+                raise UnauthorizedError("Authentication required")
 
             if current_user["role"] not in allowed_roles:
-                return error_response(
-                    "You do not have permission to perform this action", 403
-                )
+                raise ForbiddenError()
             return f(*args, **kwargs)
 
         return decorated

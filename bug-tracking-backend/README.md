@@ -12,40 +12,27 @@ This repo is backend-only (no frontend), built for CSC480.
 
 ```
 bug-tracking-backend/
-│
 ├── app/
-│   ├── __init__.py          # Flask app factory: creates the app, wires up
-│   │                         # CORS, the Supabase client, and blueprints
-│   ├── config.py             # Loads env vars, creates the Supabase client
-│   │
-│   ├── routes/
-│   │   ├── auth.py           # /api/auth/* - register, login, me
-│   │   ├── bugs.py           # /api/bugs/* - CRUD, assign, status, history
-│   │   ├── comments.py       # /api/bugs/<id>/comments
-│   │   └── users.py          # /api/users/* - admin user management
-│   │
-│   ├── middleware/
-│   │   ├── auth.py           # JWT create/verify + @token_required decorator
-│   │   └── permissions.py    # @role_required(...) decorator (RBAC)
-│   │
-│   └── utils/
-│       ├── responses.py      # success_response()/error_response() helpers
-│       └── validators.py     # field validation + status-transition rules
-│
+│   ├── __init__.py          # create_app() factory (CORS, Supabase client, blueprints)
+│   ├── config.py            # env-var config + Supabase client creation
+│   ├── extensions.py        # get_db() accessor for the shared Supabase client
+│   ├── errors.py            # ApiError classes + global JSON error handlers
+│   ├── routes/              # auth, bugs, comments, users, projects, admin_requests,
+│   │                        # notifications (incl. live stream), support (thin HTTP layer)
+│   ├── services/            # bug, user, project, admin_request, notification (notify()),
+│   │                        # realtime (live pub/sub), email (SMTP in background)
+│   ├── middleware/          # auth.py (JWT, @token_required), permissions.py (@role_required)
+│   └── utils/               # responses.py, request.py (json_body), validators.py (rules, workflow)
 ├── tests/
-│   └── test_api.py           # pytest integration tests (12 scenarios)
-│
-├── sql/
-│   └── schema.sql            # run this in the Supabase SQL editor
-│
+│   ├── fakes.py             # in-memory fake Supabase (offline tests)
+│   ├── conftest.py          # fixtures
+│   ├── test_*.py            # fast offline suite (runs by default)
+│   └── integration/         # opt-in tests against a real Supabase project
+├── scripts/check_supabase.py   # connectivity check (was test_supabase.py)
+├── sql/schema.sql  sql/migrations/001_projects_notifications_support.sql
 ├── postman/
-│   └── Bug_Tracking_API.postman_collection.json
-│
-├── .env.example
-├── requirements.txt
-├── run.py                    # local dev entry point
-├── Procfile                  # tells Render how to start the app
-└── README.md
+├── .env.example  requirements.txt  requirements-dev.txt  pytest.ini
+├── run.py  Procfile  README.md
 ```
 
 ### How the files connect
@@ -61,19 +48,31 @@ Every route file follows the same pattern:
 @token_required        # from middleware/auth.py - verifies the JWT
 @role_required("admin")  # from middleware/permissions.py - checks the role
 def handler():
-    supabase = current_app.config["SUPABASE_CLIENT"]
+    data = json_body()               # utils/request.py - always a dict, or 400
+    bug = get_viewable_bug(bug_id)   # services raise NotFoundError / ForbiddenError
+    if not data.get("status"):
+        raise BadRequestError("...")  # app/errors.py turns this into the JSON envelope
     ...
-    return success_response(...) / error_response(...)
+    return success_response(...)
 ```
+
+Failures are *raised* (`BadRequestError`, `UnauthorizedError`, `ForbiddenError`,
+`NotFoundError`), never returned, so helpers can stop a request from any depth
+and every error reaches the client in the same `{"success": false, "message": ...}` shape.
 
 ---
 
 ## 2. Supabase Setup
 
 1. Create a project at [supabase.com](https://supabase.com).
-2. Go to **SQL Editor → New query**, paste the contents of `sql/schema.sql`,
-   and run it. This creates `users`, `bugs`, `comments`, and `bug_history`
-   with the right foreign keys, `CHECK` constraints, and indexes.
+2. Go to **SQL Editor → New query** and run ONE of these:
+   - **New database:** paste `sql/schema.sql` and run it. It creates every table
+     (projects, users, bugs, comments, bug_history, notifications,
+     admin_requests, faqs, support_questions).
+   - **Database from the older version:** paste
+     `sql/migrations/001_projects_notifications_support.sql` and run it. It keeps
+     your data, moves everyone into a "Default Project", and prints that
+     project's invite code at the end.
 3. Go to **Project Settings → API** and copy:
    - **Project URL** → `SUPABASE_URL`
    - **`service_role` secret key** → `SUPABASE_KEY`
@@ -109,15 +108,52 @@ python run.py
 The API is now running at `http://localhost:5000/api`. Check
 `GET http://localhost:5000/api/health` to confirm it's up.
 
-### Creating your first Admin
-`POST /api/auth/register` always creates a **tester** account on purpose
-(see security notes below) — nobody can register themselves in as an admin.
-To get your first Admin/Developer accounts:
-1. Register normally through the API.
-2. In Supabase's **Table Editor → users**, edit that row's `role` column to
-   `admin` (or `developer`).
-3. From then on, that Admin can promote other users via
-   `PUT /api/users/<id>/role`.
+### Who is who (roles)
+
+| Role | Belongs to a project? | Can |
+|---|---|---|
+| **Owner** (you and your team) | No | Approve or reject admin requests, see every project |
+| **Admin** | Yes, the one they created | Manage bugs, members' roles, invite code, Help Center |
+| **Tester** | Yes | Report bugs, verify fixes (close / reopen) |
+| **Developer** | Yes | Work on bugs assigned to them |
+
+### First-time setup (numbered, with checkpoints)
+1. Put your team's emails in `OWNER_EMAILS` in `.env` (comma-separated), restart the server.
+2. Register on the website with one of those emails (choose either tab; owner
+   emails always become owners). **Checkpoint:** after signing in you land on
+   **Admin Requests**.
+3. A team lead registers with **Request admin access**. **Checkpoint:** you get a
+   notification (and an email if SMTP is set up); approve it.
+4. The lead signs in, creates a project and sees its **invite code** on the
+   dashboard. **Checkpoint:** the code looks like `BUG-7KQ2X9`.
+5. Everyone else registers with **Join a project** + that code. They join as
+   Testers; the admin promotes developers on the **Users** page.
+
+No owner yet and want to approve requests directly? In Supabase run
+`update users set role = 'owner', project_id = null where email = 'you@example.com';`
+
+### Email setup (optional)
+Without `SMTP_HOST` the app works normally and writes each email to the server
+log instead (look for `Email (SMTP not configured, not sent)`). To really send
+with Gmail:
+1. Turn on 2-Step Verification for the Google account.
+2. Google Account → Security → **App passwords** → create one (16 characters).
+3. In `.env`: `SMTP_HOST=smtp.gmail.com`, `SMTP_PORT=587`, `SMTP_USER=you@gmail.com`,
+   `SMTP_PASSWORD=<the app password>`, `APP_URL=<your frontend URL>`.
+4. Restart. **Checkpoint:** assign a bug to a developer; their inbox gets
+   "Assigned to you: ...". If not, the server log shows `Failed to send email` with the reason.
+
+Emails are sent in a background thread (clicking "Assign" never waits for
+them) and only for important events: admin request (to owners), request
+decided, assigned to you, ready to verify, reopened, role changed, support
+question (to admins). Each user can turn them off in Settings.
+
+### Live notifications
+`GET /api/notifications/stream` is a Server-Sent Events stream: the server
+pushes each notification the moment it is created. The browser reconnects
+automatically and re-syncs over normal HTTP, so nothing is missed. Because
+connected tabs are tracked in memory, run **one** gunicorn process with
+threads (the `Procfile` already does: `--worker-class gthread --workers 1 --threads 32`).
 
 ---
 
@@ -129,19 +165,60 @@ All responses share this shape:
 { "success": false, "message": "...", "errors": { ... } }
 ```
 
+Everything below except auth, notifications and admin requests is **scoped to
+your project**: you never see or touch another project's bugs or members
+(they return 404).
+
 ### Auth
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| POST | `/api/auth/register` | – | Create account (always role=`tester`) |
-| POST | `/api/auth/login` | – | Returns `{ token, user }` |
-| GET | `/api/auth/me` | any | Current user's profile |
+| POST | `/api/auth/register` | – | Body: name, email, password + `invite_code` (join as tester) **or** `request_admin: true, reason`. Emails in `OWNER_EMAILS` become owners. |
+| POST | `/api/auth/login` | – | Returns `{ token, user, project, admin_request }` |
+| GET | `/api/auth/me` | any | `{ user, project, admin_request }` (project includes `invite_code` for admins) |
+| PUT | `/api/auth/me/preferences` | any | `{ "email_notifications": false }` |
+
+### Projects
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | `/api/projects` | admin without a project | `{ "name": "..." }`; creates it with an invite code and starter FAQs |
+| POST | `/api/projects/join` | user without a project | `{ "invite_code": "BUG-..." }`; joins as tester |
+| GET | `/api/projects/current` | member | Project, member count (+ invite code for admins) |
+| PUT | `/api/projects/current` | admin | Rename |
+| POST | `/api/projects/current/invite-code` | admin | New code; the old one stops working |
+| GET | `/api/projects` | owner | Every project with member and bug counts |
+
+### Admin requests
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| POST | `/api/admin-requests` | user without a project | `{ "reason": "..." }` (also possible at registration) |
+| GET | `/api/admin-requests` | owner | All requests, newest first |
+| PUT | `/api/admin-requests/<id>` | owner | `{ "decision": "approve" \| "reject" }` |
+
+### Notifications
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| GET | `/api/notifications` | any | Latest (`?limit=`, `?unread=true`) + `unread_count` |
+| GET | `/api/notifications/unread-count` | any | For the bell badge |
+| PUT | `/api/notifications/<id>/read` | any (own only) | Mark one read |
+| PUT | `/api/notifications/read-all` | any | Mark all read |
+| GET | `/api/notifications/stream` | any | Live Server-Sent Events stream |
+
+### Support chat
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| GET | `/api/support/faqs` | member | Project FAQs, most helpful first |
+| POST | `/api/support/faqs/<id>/hit` | member | "That helped" counter |
+| POST / PUT / DELETE | `/api/support/faqs[/<id>]` | admin | Manage FAQs (`question`, `answer`, `keywords`) |
+| POST | `/api/support/questions` | member | Ask the admins (they get a notification + email) |
+| GET | `/api/support/questions` | member | Admins: all; others: their own |
+| PUT | `/api/support/questions/<id>/answer` | admin | `{ "answer", "add_to_faq": true }`; the asker is notified |
 
 ### Users
 | Method | Endpoint | Auth | Description |
 |---|---|---|---|
-| GET | `/api/users` | admin | List all users |
-| GET | `/api/users/developers` | any | List developers (for assign dropdown) |
-| PUT | `/api/users/<id>/role` | admin | Change a user's role |
+| GET | `/api/users` | admin | Members of your project |
+| GET | `/api/users/developers` | member | Developers in your project (for the assign dropdown) |
+| PUT | `/api/users/<id>/role` | admin | `admin` / `tester` / `developer` (not your own; never `owner`) |
 
 ### Bugs
 | Method | Endpoint | Auth | Description |
@@ -203,16 +280,23 @@ Suggested run order:
 ## Running the automated tests
 
 ```bash
-pip install pytest
-# pre-create one admin + one developer account (see section 3), then:
-export TEST_ADMIN_EMAIL=admin@example.com
-export TEST_ADMIN_PASSWORD=Passw0rd!
-export TEST_DEVELOPER_EMAIL=developer@example.com
-export TEST_DEVELOPER_PASSWORD=Passw0rd!
-pytest tests/test_api.py -v
+pip install -r requirements-dev.txt
+pytest                      # offline suite: no network, no credentials, ~10s
 ```
-These are integration tests — they run against whatever Supabase project
-your `.env` points at, so consider using a separate test project.
+
+The default suite runs the whole API against an in-memory fake of Supabase
+(`tests/fakes.py`), covering registration, login, token handling, validation,
+the full bug lifecycle, role permissions, history and comments.
+
+To also run the live tests against a real Supabase project (pre-create an
+admin and a developer account first, see section 3):
+
+```bash
+export RUN_LIVE_TESTS=1
+export TEST_ADMIN_EMAIL=admin@example.com   TEST_ADMIN_PASSWORD=Passw0rd!
+export TEST_DEVELOPER_EMAIL=developer@example.com   TEST_DEVELOPER_PASSWORD=Passw0rd!
+pytest tests/integration -v
+```
 
 ---
 
@@ -242,10 +326,14 @@ your `.env` points at, so consider using a separate test project.
 3. Settings:
    - **Runtime**: Python 3
    - **Build Command**: `pip install -r requirements.txt`
-   - **Start Command**: `gunicorn run:app --bind 0.0.0.0:$PORT` (already in `Procfile`, Render auto-detects it)
+   - **Start Command**: `gunicorn run:app --bind 0.0.0.0:$PORT --worker-class gthread --workers 1 --threads 32 --timeout 120`
+     (already in `Procfile`; one process with threads keeps live notifications working)
 4. Add Environment Variables in the Render dashboard (Environment tab):
    `SUPABASE_URL`, `SUPABASE_KEY`, `JWT_SECRET_KEY`, `JWT_EXPIRES_HOURS`,
-   `CORS_ORIGINS`, `FLASK_ENV=production`.
+   `CORS_ORIGINS`, `FLASK_ENV=production`, `OWNER_EMAILS`, `APP_URL`, and the
+   `SMTP_*` / `EMAIL_FROM` values if you want real emails.
+   Note: Render's free tier sleeps when idle, so the first request (and the
+   live connection) can take ~30 s to wake it.
 5. Deploy. Render sets `PORT` automatically; `run.py`/gunicorn both read it,
    so the app listens on the host/port Render expects.
 6. Confirm with `GET https://your-app.onrender.com/api/health`.
@@ -264,6 +352,11 @@ your `.env` points at, so consider using a separate test project.
 | CORS error in the browser console | Frontend origin not in `CORS_ORIGINS` | Add the exact frontend URL (or use `*` for local dev only) |
 | Supabase insert/select errors mentioning RLS | Using the `anon` key instead of `service_role` | Double check `SUPABASE_KEY` in `.env`/Render is the service_role key |
 | `relation "bugs" does not exist` | `sql/schema.sql` not run yet | Run it in the Supabase SQL Editor |
+| `column users.project_id does not exist` / `relation "notifications" does not exist` | Database created with the old schema | Run `sql/migrations/001_projects_notifications_support.sql` |
+| `403 Join or create a project first` | Account has no project yet | Sign in on the website; the Welcome page lets you join with a code or create a project |
+| Registering says "Invite code not found" | Typo, or the admin made a new code | Copy the current code from the admin dashboard |
+| Bell never updates until refresh | Several gunicorn workers, or a proxy buffering the stream | Use the `Procfile` command (1 worker, threads) |
+| No emails arrive | SMTP not configured or wrong app password | Check the server log for `Email (SMTP not configured` or `Failed to send email` |
 | App crashes on Render but works locally | Missing environment variables in Render's dashboard | Re-add all vars from `.env.example` under Render → Environment |
 
 ---

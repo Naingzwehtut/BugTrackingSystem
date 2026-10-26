@@ -1,60 +1,58 @@
 import axios from 'axios'
+import { tokenStorage } from '@/utils/storage'
 
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000'
+export const API_URL = (import.meta.env.VITE_API_URL || 'http://localhost:5000').replace(/\/$/, '')
 
 const api = axios.create({
   baseURL: API_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: { 'Content-Type': 'application/json' },
 })
 
-// Attach JWT automatically
+// Attach the JWT to every request.
 api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token')
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`
-  }
+  const token = tokenStorage.get()
+  if (token) config.headers.Authorization = `Bearer ${token}`
   return config
 })
 
-// Central place to translate backend errors into friendly messages.
-export function getErrorMessage(error) {
-  const status = error?.response?.status
-
-  if (!error?.response) {
-    return 'Unable to reach the server. Please check your connection.'
-  }
-
-  switch (status) {
-    case 400:
-      return error.response?.data?.message || 'Please check the information you entered.'
-    case 401:
-      return 'Your session has expired. Please log in again.'
-    case 403:
-      return 'You do not have permission to perform this action.'
-    case 404:
-      return 'The requested resource could not be found.'
-    case 500:
-      return 'Something went wrong. Please try again.'
-    default:
-      return error.response?.data?.message || 'Something went wrong. Please try again.'
-  }
+// A 401 on a protected endpoint means the session is gone. Instead of a hard
+// page reload, tell the AuthProvider (registered below) to clear its state so
+// React Router redirects to /login and remembers where the user was.
+let unauthorizedHandler = null
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = handler
 }
 
-// Handle 401 globally: clear auth state and send the user back to login.
+const AUTH_ENDPOINT = /\/api\/auth\/(login|register)$/
+
 api.interceptors.response.use(
   (response) => response,
   (error) => {
-    if (error?.response?.status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('user')
-      if (!window.location.pathname.startsWith('/login')) {
-        window.location.href = '/login'
-      }
-    }
+    const isAuthRequest = AUTH_ENDPOINT.test(error.config?.url ?? '')
+    if (error.response?.status === 401 && !isAuthRequest) unauthorizedHandler?.()
     return Promise.reject(error)
-  }
+  },
 )
+
+const FALLBACK_MESSAGE = 'Something went wrong. Please try again.'
+const STATUS_MESSAGES = {
+  400: 'Please check the information you entered.',
+  401: 'Your session has expired. Please log in again.',
+  403: 'You do not have permission to perform this action.',
+  404: 'The requested resource could not be found.',
+}
+
+// Turn any axios error into a message that is safe and useful to show.
+// The backend already sends clear messages ("Invalid status transition...",
+// "Invalid email or password"), so prefer them over generic wording.
+export function getErrorMessage(error) {
+  if (!error?.response) return 'Unable to reach the server. Please check your connection.'
+  const { status, data } = error.response
+  if (status >= 500) return FALLBACK_MESSAGE
+  return data?.message || STATUS_MESSAGES[status] || FALLBACK_MESSAGE
+}
+
+// Every endpoint wraps its payload as { success, message, data }.
+export const unwrap = (response) => response.data?.data ?? {}
 
 export default api

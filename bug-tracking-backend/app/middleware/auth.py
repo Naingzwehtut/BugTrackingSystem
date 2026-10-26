@@ -1,28 +1,27 @@
 """
 app/middleware/auth.py
 ------------------------
-Everything related to JWT tokens:
-  - creating a token when a user logs in
-  - decoding/validating a token on every protected request
-  - a `@token_required` decorator that routes use to protect endpoints
+JWT handling: creating a token at login, validating it on every protected
+request, and the `@token_required` decorator that routes use.
 
-How it fits together:
-  routes/*.py  ->  uses @token_required  ->  this file verifies the JWT,
-  loads the user row from Supabase, and stores it on `flask.g.current_user`
-  so the route function can read `g.current_user["role"]`, etc.
+On success `@token_required` stores the freshly loaded user on
+`flask.g.current_user` (without password_hash). The user row is re-read from
+the database on each request so role changes and deleted accounts take
+effect immediately instead of trusting stale data inside the token.
 """
 
-from functools import wraps
 from datetime import datetime, timedelta, timezone
+from functools import wraps
 
 import jwt
-from flask import request, g, current_app
+from flask import current_app, g, request
 
-from app.utils.responses import error_response
+from app.errors import UnauthorizedError
+from app.extensions import get_db
 
 
 def generate_token(user):
-    """Create a signed JWT for a user dict (must contain id, email, role)."""
+    """Create a signed JWT for a user dict containing id, email and role."""
     now = datetime.now(timezone.utc)
     payload = {
         "sub": user["id"],
@@ -36,14 +35,11 @@ def generate_token(user):
         current_app.config["JWT_SECRET_KEY"],
         algorithm=current_app.config["JWT_ALGORITHM"],
     )
-    # PyJWT >= 2 returns a str already; older versions return bytes.
-    if isinstance(token, bytes):
-        token = token.decode("utf-8")
-    return token
+    return token.decode("utf-8") if isinstance(token, bytes) else token  # PyJWT < 2
 
 
 def decode_token(token):
-    """Decode and validate a JWT. Raises jwt exceptions on failure."""
+    """Decode and validate a JWT. Raises a jwt exception on failure."""
     return jwt.decode(
         token,
         current_app.config["JWT_SECRET_KEY"],
@@ -51,51 +47,48 @@ def decode_token(token):
     )
 
 
-def _extract_token_from_header():
-    auth_header = request.headers.get("Authorization", "")
-    if not auth_header.startswith("Bearer "):
+def _bearer_token():
+    header = request.headers.get("Authorization", "")
+    if not header.startswith("Bearer "):
         return None
-    return auth_header.split(" ", 1)[1].strip()
+    return header.split(" ", 1)[1].strip() or None
+
+
+USER_COLUMNS = "id, name, email, role, project_id, email_notifications, created_at"
+
+
+def load_current_user():
+    """Validate the Bearer token and return the user row it belongs to (or 401)."""
+    token = _bearer_token()
+    if not token:
+        raise UnauthorizedError("Missing or invalid Authorization header")
+
+    try:
+        payload = decode_token(token)
+    except jwt.ExpiredSignatureError:
+        raise UnauthorizedError("Token has expired, please log in again") from None
+    except jwt.InvalidTokenError:
+        raise UnauthorizedError("Invalid token") from None
+
+    result = (
+        get_db()
+        .table("users")
+        .select(USER_COLUMNS)
+        .eq("id", payload.get("sub"))
+        .limit(1)
+        .execute()
+    )
+    if not result.data:
+        raise UnauthorizedError("User account no longer exists")
+    return result.data[0]
 
 
 def token_required(f):
-    """
-    Decorator for protected routes.
-
-    On success, sets:
-      g.current_user = {"id": ..., "email": ..., "role": ..., "name": ...}
-    On failure, returns a 401 JSON response and the wrapped function is
-    never called.
-    """
+    """Protect a route: 401 unless a valid Bearer token for a real user is sent."""
 
     @wraps(f)
     def decorated(*args, **kwargs):
-        token = _extract_token_from_header()
-        if not token:
-            return error_response("Missing or invalid Authorization header", 401)
-
-        try:
-            payload = decode_token(token)
-        except jwt.ExpiredSignatureError:
-            return error_response("Token has expired, please log in again", 401)
-        except jwt.InvalidTokenError:
-            return error_response("Invalid token", 401)
-
-        # Load the current user fresh from the database. This makes sure
-        # that, e.g., a role change or deleted account takes effect
-        # immediately instead of trusting stale data baked into the token.
-        supabase = current_app.config["SUPABASE_CLIENT"]
-        result = (
-            supabase.table("users")
-            .select("id, name, email, role, created_at")
-            .eq("id", payload["sub"])
-            .limit(1)
-            .execute()
-        )
-        if not result.data:
-            return error_response("User account no longer exists", 401)
-
-        g.current_user = result.data[0]
+        g.current_user = load_current_user()
         return f(*args, **kwargs)
 
     return decorated

@@ -1,98 +1,113 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import * as bugService from '../../services/bugService'
-import { getErrorMessage } from '../../services/api'
-import { useToast } from '../../components/common/Toast.jsx'
-import { PRIORITY_LIST, SEVERITY_LIST } from '../../utils/constants'
+import Alert from '@/components/ui/Alert'
+import Button from '@/components/ui/Button'
+import Field from '@/components/ui/Field'
+import PageHeader from '@/components/ui/PageHeader'
+import { DESCRIPTION_MAX, DESCRIPTION_MIN, PRIORITY_LIST, SEVERITY_LIST, TITLE_MAX } from '@/config/constants'
+import { usePageTitle } from '@/hooks/usePageTitle'
+import { useToast } from '@/hooks/useToast'
+import { getErrorMessage } from '@/services/api'
+import { createBug } from '@/services/bugService'
+import { compactErrors, validateDescription, validateTitle } from '@/utils/validation'
+
+const INITIAL_FORM = {
+  title: '',
+  description: '',
+  // Sensible middle-of-the-road defaults; the tester raises them if needed.
+  severity: 'Major',
+  priority: 'Medium',
+}
+
+const asOptions = (list) => list.map((item) => <option key={item}>{item}</option>)
 
 export default function CreateBug() {
+  usePageTitle('Create Bug')
   const navigate = useNavigate()
-  const { showToast } = useToast()
+  const toast = useToast()
 
-  const [form, setForm] = useState({
-    title: '',
-    description: '',
-    severity: SEVERITY_LIST[0],
-    priority: PRIORITY_LIST[0],
-  })
-  const [error, setError] = useState('')
+  const [form, setForm] = useState(INITIAL_FORM)
+  const [errors, setErrors] = useState({})
+  const [serverError, setServerError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  function update(field) {
-    return (e) => setForm((f) => ({ ...f, [field]: e.target.value }))
+  const update = (field) => (event) => {
+    setForm((current) => ({ ...current, [field]: event.target.value }))
+    setErrors((current) => ({ ...current, [field]: '' }))
   }
 
-  async function handleSubmit(e) {
-    e.preventDefault()
-    setError('')
+  async function handleSubmit(event) {
+    event.preventDefault()
+    setServerError('')
+
+    const found = compactErrors({
+      title: validateTitle(form.title),
+      description: validateDescription(form.description),
+    })
+    setErrors(found)
+    if (Object.keys(found).length > 0) return
+
     setLoading(true)
     try {
-      const res = await bugService.createBug(form)
-      showToast('Bug created successfully.', 'success')
-      const newId = res.data?.bug?.id || res.data?.id
-      navigate(newId ? `/bugs/${newId}` : '/bugs')
+      const bug = await createBug({ ...form, title: form.title.trim(), description: form.description.trim() })
+      toast.success('Bug created successfully.')
+      navigate(`/bugs/${bug.id}`)
     } catch (err) {
-      setError(getErrorMessage(err))
-    } finally {
+      setServerError(getErrorMessage(err))
       setLoading(false)
     }
   }
 
   return (
-    <div className="mx-auto max-w-2xl">
-      <h1 className="mb-1 text-xl font-semibold text-gray-900">Create Bug</h1>
-      <p className="mb-6 text-sm text-gray-500">Report a new issue for the team to triage.</p>
+    <div className="mx-auto flex max-w-2xl flex-col gap-6">
+      <PageHeader title="Create Bug" subtitle="Report a new issue for the team to triage." />
 
       <div className="card p-6">
-        {error && (
-          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-600">
-            {error}
-          </div>
-        )}
+        <Alert variant="error" className="mb-4">
+          {serverError}
+        </Alert>
 
-        <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-          <div>
-            <label className="label">Title</label>
-            <input required className="input" value={form.title} onChange={update('title')} />
-          </div>
+        <form onSubmit={handleSubmit} noValidate className="flex flex-col gap-4">
+          <Field
+            label="Title"
+            maxLength={TITLE_MAX}
+            placeholder="e.g. Checkout fails when a coupon is applied"
+            autoFocus
+            value={form.title}
+            onChange={update('title')}
+            error={errors.title}
+          />
+          <Field
+            as="textarea"
+            label="Description"
+            rows={7}
+            className="resize-y"
+            maxLength={DESCRIPTION_MAX}
+            showCount
+            placeholder={'Steps to reproduce:\n1. ...\n\nExpected:\nActual:'}
+            value={form.description}
+            onChange={update('description')}
+            error={errors.description}
+            hint={`What happened, what you expected, and how to reproduce it (at least ${DESCRIPTION_MIN} characters).`}
+          />
 
-          <div>
-            <label className="label">Description</label>
-            <textarea
-              required
-              rows={5}
-              className="input resize-none"
-              value={form.description}
-              onChange={update('description')}
-            />
-          </div>
-
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <label className="label">Priority</label>
-              <select className="input" value={form.priority} onChange={update('priority')}>
-                {PRIORITY_LIST.map((p) => (
-                  <option key={p} value={p}>{p}</option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="label">Severity</label>
-              <select className="input" value={form.severity} onChange={update('severity')}>
-                {SEVERITY_LIST.map((s) => (
-                  <option key={s} value={s}>{s}</option>
-                ))}
-              </select>
-            </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Field as="select" label="Priority" value={form.priority} onChange={update('priority')}>
+              {asOptions(PRIORITY_LIST)}
+            </Field>
+            <Field as="select" label="Severity" value={form.severity} onChange={update('severity')}>
+              {asOptions(SEVERITY_LIST)}
+            </Field>
           </div>
 
           <div className="flex justify-end gap-3 pt-2">
-            <button type="button" onClick={() => navigate(-1)} className="btn-secondary">
+            {/* Go back if we came from inside the app; otherwise to the dashboard. */}
+            <Button variant="secondary" onClick={() => (window.history.state?.idx > 0 ? navigate(-1) : navigate('/tester/dashboard'))}>
               Cancel
-            </button>
-            <button type="submit" disabled={loading} className="btn-primary">
-              {loading ? 'Creating...' : 'Create Bug'}
-            </button>
+            </Button>
+            <Button type="submit" loading={loading} loadingText="Creating...">
+              Create Bug
+            </Button>
           </div>
         </form>
       </div>

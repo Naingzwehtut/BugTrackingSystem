@@ -1,16 +1,13 @@
-import api from './api'
+import api, { unwrap } from './api'
 
-export async function getUsers() {
-  const res = await api.get('/api/users')
-  return res.data
+export async function getUsers({ signal } = {}) {
+  return unwrap(await api.get('/api/users', { signal })).users ?? []
 }
 
-export async function getDevelopers() {
-  const res = await api.get('/api/users/developers')
-  return res.data
+export async function getDevelopers({ signal } = {}) {
+  return unwrap(await api.get('/api/users/developers', { signal })).developers ?? []
 }
 
 export async function updateUserRole(id, role) {
-  const res = await api.put(`/api/users/${id}/role`, { role })
-  return res.data
+  return unwrap(await api.put(`/api/users/${id}/role`, { role })).user
 }
