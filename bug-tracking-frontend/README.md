@@ -67,7 +67,7 @@ it's already listed in `.gitignore`.
 
 ## 3. Run locally
 
-```bash
+```bashn
 npm run dev
 ```
 
